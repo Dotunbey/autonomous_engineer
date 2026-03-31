@@ -1,9 +1,11 @@
 #!/bin/bash
 
+export PYTHONPATH=.
+
 # 1. Start the Celery worker in the background
-# The '&' at the end pushes this process to run in the background
-celery -A autonomous_engineer.infra.queue worker --loglevel=info &
+# Pointing directly to infra.queue because infra/ is at the root of the repo
+celery -A infra.queue worker --loglevel=info &
 
 # 2. Start the FastAPI server in the foreground
-# This keeps the container/Render service alive and listening for web traffic
-uvicorn autonomous_engineer.api.server:app --host 0.0.0.0 --port ${PORT:-8000}
+# Pointing directly to api.server because api/ is at the root of the repo
+uvicorn api.server:app --host 0.0.0.0 --port ${PORT:-8000}
