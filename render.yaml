@@ -1,0 +1,61 @@
+# This file tells Render exactly how to deploy your multi-service architecture
+services:
+  # 1. The FastAPI Web Server
+  - type: web
+    name: autonomous-engineer-api
+    env: python
+    region: ohio
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn autonomous_engineer.api.server:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: ENV
+        value: production
+      # Connects automatically to the Redis instance defined below
+      - key: CELERY_BROKER_URL
+        fromService:
+          type: redis
+          name: autonomous-redis
+          property: connectionString
+      - key: CELERY_RESULT_BACKEND
+        fromService:
+          type: redis
+          name: autonomous-redis
+          property: connectionString
+      # Render will ask you to fill these in the dashboard securely
+      - key: AGENT_API_KEY
+        sync: false 
+      - key: OPENAI_API_KEY
+        sync: false
+
+  # 2. The Celery Worker (Runs the agents)
+  - type: worker
+    name: autonomous-engineer-worker
+    env: python
+    region: ohio
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: celery -A autonomous_engineer.infra.queue worker --loglevel=info --concurrency=2
+    envVars:
+      - key: ENV
+        value: production
+      - key: CELERY_BROKER_URL
+        fromService:
+          type: redis
+          name: autonomous-redis
+          property: connectionString
+      - key: CELERY_RESULT_BACKEND
+        fromService:
+          type: redis
+          name: autonomous-redis
+          property: connectionString
+      - key: OPENAI_API_KEY
+        sync: false
+
+# 3. Managed Redis (Queue & Result Backend)
+databases:
+  - type: redis
+    name: autonomous-redis
+    region: ohio
+    plan: free
+    maxmemoryPolicy: noeviction

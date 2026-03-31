@@ -1,0 +1,49 @@
+version: '3.8'
+
+services:
+  # The FastAPI Web Server
+  api:
+    build: .
+    container_name: agent_api
+    ports:
+      - "8000:8000"
+      - "9090:9090" # Metrics exposed from API
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      - redis
+    command: uvicorn autonomous_engineer.api.server:app --host 0.0.0.0 --port 8000
+
+  # The Celery Worker Node
+  worker:
+    build: .
+    container_name: agent_worker
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock # Allows container to spin up sibling sandbox containers
+    depends_on:
+      - redis
+    command: celery -A autonomous_engineer.infra.queue worker --loglevel=info
+
+  # Redis for Queue and Result Backend
+  redis:
+    image: redis:7.0-alpine
+    container_name: agent_redis
+    ports:
+      - "6379:6379"
+
+  # Prometheus for Timeseries Metrics
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: agent_prometheus
+    ports:
+      - "9091:9090" # Access Prometheus UI on 9091
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    depends_on:
+      - api
+      - worker
