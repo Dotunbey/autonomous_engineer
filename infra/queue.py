@@ -1,3 +1,4 @@
+#!infra/queue.py
 import os
 import logging
 from celery import Celery

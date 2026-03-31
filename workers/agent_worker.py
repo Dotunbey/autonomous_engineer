@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import httpx
 from typing import Any, Dict
 from openai import OpenAI
 
@@ -34,9 +35,14 @@ def execute_engineering_task(self: Any, task_id: str, goal: str, workspace: str)
         # If using Gemini, the model name must be gemini-1.5-flash or gemini-1.5-pro
         model_name = os.getenv("DEFAULT_MODEL", "gemini-1.5-flash")
         
+        # FIX: Explicitly pass an httpx.Client() to avoid the 'proxies' TypeError 
+        # caused by older OpenAI library versions conflicting with newer httpx versions.
+        custom_http_client = httpx.Client()
+        
         llm_client = OpenAI(
             api_key=api_key,
-            base_url=base_url
+            base_url=base_url,
+            http_client=custom_http_client
         )
         
         logger.info(f"Using LLM: {model_name} at {base_url}")
