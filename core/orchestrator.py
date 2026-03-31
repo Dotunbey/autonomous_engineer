@@ -20,6 +20,25 @@ class Orchestrator:
         self.repo = GraphRepository()
         self.graph_id = str(uuid.uuid4())
 
+    async def _safe_publish(self, event_name: str, payload: Dict[str, Any]) -> None:
+        """
+        Safely publishes telemetry events to the EventBus.
+        Duck-types a mock Enum object to satisfy the EventBus `.value` requirement,
+        ensuring telemetry failures never crash the main orchestration loop.
+        """
+        try:
+            class DynamicEvent:
+                @property
+                def value(self):
+                    return event_name
+                @property
+                def name(self):
+                    return event_name.replace(".", "_").upper()
+                    
+            await self.bus.publish(DynamicEvent(), payload)
+        except Exception as e:
+            logger.debug(f"EventBus publish skipped for {event_name}: {e}")
+
     async def _route_and_execute(self, role: str, description: str) -> Dict[str, Any]:
         """
         Dynamically initializes the correct agent based on the role and executes the task.
@@ -34,12 +53,10 @@ class Orchestrator:
         registry = ToolRegistry()
         
         # --- PRO FIX: Dynamic Tool Injection & Interception ---
-        # Prevents 429 loops by ensuring the agent ALWAYS has access to file & shell tools.
         original_execute = getattr(registry, "execute", None)
         original_list_tools = getattr(registry, "list_tools", None)
         
         def safe_execute(action: str, **kwargs) -> str:
-            # Intercept file writing tools
             if action in ["write_file", "create_file"]:
                 path = kwargs.get("path", kwargs.get("filename", "output.txt"))
                 content = kwargs.get("content", kwargs.get("code", ""))
@@ -53,7 +70,6 @@ class Orchestrator:
                 except Exception as e:
                     return f"Tool Execution Error: Failed to write file - {e}"
             
-            # Intercept shell execution tools
             if action in ["run_shell_command", "execute_bash", "shell"]:
                 cmd = kwargs.get("command", kwargs.get("cmd", ""))
                 try:
@@ -63,7 +79,6 @@ class Orchestrator:
                 except Exception as e:
                     return f"Tool Execution Error: Shell failure - {e}"
             
-            # Fallback to standard registry tools if any
             if original_execute:
                 try:
                     return original_execute(action, **kwargs)
@@ -79,19 +94,16 @@ class Orchestrator:
                 def dict(self) -> dict:
                     return {"name": self.name, "description": self.description}
                     
-            # Inject tools so they show up in the LLM's system prompt
             tools.append(InjectedTool("write_file", "Writes text to a file. Arguments: 'path' (string), 'content' (string)"))
             tools.append(InjectedTool("run_shell_command", "Executes a shell command. Arguments: 'command' (string)"))
             return tools
 
-        # Bind the patched methods
         registry.execute = safe_execute
         registry.list_tools = safe_list_tools
         # ------------------------------------------------------
 
         retriever = ContextRetriever(ShortTermMemory(), LongTermMemory())
         
-        # 2. Select the correct Specialized Agent
         AgentClass = None
         safe_role = role.lower().strip()
         
@@ -111,7 +123,7 @@ class Orchestrator:
             logger.error(f"Could not import agent for role {role}: {e}")
             from agents.coder import CoderAgent as AgentClass
 
-        # 3. Instantiate the Agent (Pass the model_name to override defaults)
+        # Instantiate the Agent 
         agent = AgentClass(
             tool_registry=registry,
             retriever=retriever,
@@ -119,14 +131,11 @@ class Orchestrator:
             model_name=self.planner.model
         )
         
-        # 4. Prepare Task Node and Context
         task = TaskNode(id=str(uuid.uuid4()), description=description, agent_role=role)
         context = {"workspace": self.workspace}
         
-        # 5. Execute Task (Running synchronous agent loop in a thread to prevent blocking)
         result_task = await asyncio.to_thread(agent.execute_task, task, context)
         
-        # Extract Enum value safely (if NodeStatus is an Enum)
         status_str = getattr(result_task.status, "name", str(result_task.status))
         
         return {
@@ -142,10 +151,9 @@ class Orchestrator:
         # 1. Ask the real LLM for a plan
         try:
             nodes = self.planner.create_plan(goal)
-            # PRO FIX: Await the async event publisher to prevent Coroutine Warnings and graph tracking deadlocks
-            await self.bus.publish("plan.created", {"nodes": len(nodes)})
+            await self._safe_publish("plan.created", {"nodes": len(nodes)})
         except Exception as e:
-            logger.error("Planning phase failed.")
+            logger.error(f"Planning phase failed: {e}")
             return {"success": False, "error": str(e)}
 
         if not nodes:
@@ -161,7 +169,7 @@ class Orchestrator:
             desc = node["description"]
             
             logger.info(f"Executing Node: [{node_id}] | Role: {role} | Desc: {desc}")
-            await self.bus.publish("task.started", {"node_id": node_id})
+            await self._safe_publish("task.started", {"node_id": node_id})
             self.repo.update_node_status(node_id, "running")
             
             # --- ACTUAL AGENT WORK ---
@@ -178,17 +186,15 @@ class Orchestrator:
             if is_completed_status and not is_api_failure:
                 logger.info(f"Node {node_id} completed successfully by {role} agent.")
                 node_status[node_id] = "completed"
-                await self.bus.publish("task.completed", {"node_id": node_id, "status": "completed"})
+                await self._safe_publish("task.completed", {"node_id": node_id, "status": "completed"})
                 self.repo.update_node_status(node_id, "completed", output=result["output_data"])
             else:
-                # Catch actual failures AND masked API failures
                 error_msg = final_answer if is_api_failure else result.get("error_message", "Unknown error")
                 logger.error(f"Node {node_id} failed: {error_msg}")
                 node_status[node_id] = "failed"
-                await self.bus.publish("task.failed", {"node_id": node_id, "error": error_msg})
+                await self._safe_publish("task.failed", {"node_id": node_id, "error": error_msg})
                 self.repo.update_node_status(node_id, "failed", error=error_msg)
                 
-                # Halt execution on failure
                 return {
                     "success": False, 
                     "graph_id": self.graph_id,
