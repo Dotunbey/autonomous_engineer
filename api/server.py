@@ -1,18 +1,14 @@
-#!api/server.py
 import logging
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from api.routes import tasks
+from api.routes import tasks, workspace  # Added workspace import
 
 logger = logging.getLogger(__name__)
 
 def create_app() -> FastAPI:
     """
     Factory function to initialize and configure the FastAPI application.
-
-    Returns:
-        A configured FastAPI application instance.
     """
     app = FastAPI(
         title="Autonomous Engineering API",
@@ -23,7 +19,7 @@ def create_app() -> FastAPI:
     # Configure CORS for potential frontend (UI) integration
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],  # In production, restrict this to the specific frontend domain
+        allow_origins=["*"], 
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -31,6 +27,8 @@ def create_app() -> FastAPI:
 
     # Register Routers
     app.include_router(tasks.router, prefix="/api/v1/tasks", tags=["Tasks"])
+    # Register the new workspace router so we can read files
+    app.include_router(workspace.router, prefix="/api/v1/workspace", tags=["Workspace"])
 
     @app.exception_handler(Exception)
     async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
