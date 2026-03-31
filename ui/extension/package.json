@@ -1,0 +1,51 @@
+{
+  "name": "autonomous-engineer",
+  "displayName": "Autonomous Engineer",
+  "description": "IDE Integration for the Autonomous AI Engineering System",
+  "version": "0.1.0",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Machine Learning",
+    "Programming Languages"
+  ],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "autonomous-engineer.submitTask",
+        "title": "Autonomous Engineer: Submit Task"
+      }
+    ],
+    "configuration": {
+      "title": "Autonomous Engineer",
+      "properties": {
+        "autonomousEngineer.apiUrl": {
+          "type": "string",
+          "default": "http://localhost:8000/api/v1/tasks/",
+          "description": "The URL of your Autonomous Engineer FastAPI server."
+        },
+        "autonomousEngineer.apiKey": {
+          "type": "string",
+          "default": "default-dev-key",
+          "description": "Your API Key for authentication (X-API-Key)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.80.0",
+    "@types/node": "18.x",
+    "typescript": "^5.1.3"
+  },
+  "dependencies": {
+    "axios": "^1.4.0"
+  }
+}
