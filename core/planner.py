@@ -14,7 +14,7 @@ class HierarchicalPlanner:
     """
     def __init__(self, llm_client: Any):
         self.llm_client = llm_client
-        self.model = os.getenv("DEFAULT_MODEL", "gemini-1.5-flash")
+        self.model = os.getenv("DEFAULT_MODEL", "gemini-2.5-flash")
 
     def create_plan(self, goal: str) -> List[Dict[str, Any]]:
         """Calls the LLM to generate a task plan."""
