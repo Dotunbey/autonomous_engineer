@@ -1,77 +1,142 @@
+#!core/orchestrator.py
 import asyncio
 import logging
-from typing import Any, Dict, Optional
-from core.schema import EventType, NodeStatus, WorkflowGraph
-from core.event_bus import EventBus
-from core.execution_graph import ExecutionGraphEngine
+import uuid
+from typing import Any, Dict
+
 from core.planner import HierarchicalPlanner
+from core.event_bus import EventBus
+from infra.persistence import GraphRepository
 
 logger = logging.getLogger(__name__)
 
 class Orchestrator:
-    """Main execution loop that coordinates planning, state management, and agents."""
-
-    def __init__(self, workspace: str, planner: HierarchicalPlanner, bus: EventBus) -> None:
+    """
+    Manages the execution lifecycle: Planning -> Graph Building -> Agent Execution -> Completion.
+    """
+    def __init__(self, workspace: str, planner: HierarchicalPlanner, bus: EventBus):
         self.workspace = workspace
         self.planner = planner
         self.bus = bus
-        self.engine: Optional[ExecutionGraphEngine] = None
+        self.repo = GraphRepository()
+        self.graph_id = str(uuid.uuid4())
+
+    async def _route_and_execute(self, role: str, description: str) -> Dict[str, Any]:
+        """
+        Dynamically initializes the correct agent based on the role and executes the task.
+        """
+        from tools.registry import ToolRegistry
+        from memory.short_term import ShortTermMemory
+        from memory.long_term import LongTermMemory
+        from memory.retrieval import ContextRetriever
+        from core.schema import TaskNode
+        
+        # 1. Initialize Memory & Tools for the Agent
+        registry = ToolRegistry()
+        retriever = ContextRetriever(ShortTermMemory(), LongTermMemory())
+        
+        # 2. Select the correct Specialized Agent
+        AgentClass = None
+        safe_role = role.lower().strip()
+        
+        try:
+            if safe_role == "coder":
+                from agents.coder import CoderAgent as AgentClass
+            elif safe_role == "reviewer":
+                from agents.reviewer import ReviewerAgent as AgentClass
+            elif safe_role == "tester":
+                from agents.tester import TesterAgent as AgentClass
+            elif safe_role == "devops":
+                from agents.devops import DevOpsAgent as AgentClass
+            else:
+                logger.warning(f"Unknown role '{role}'. Defaulting to CoderAgent.")
+                from agents.coder import CoderAgent as AgentClass
+        except ImportError as e:
+            logger.error(f"Could not import agent for role {role}: {e}")
+            # Fallback to Coder if specific agent file is missing
+            from agents.coder import CoderAgent as AgentClass
+
+        # 3. Instantiate the Agent
+        # 3. Instantiate the Agent
+        agent = AgentClass(
+            tool_registry=registry,
+            retriever=retriever,
+            llm_client=self.planner.llm_client,
+            model_name=self.planner.model  # <-- THIS FIXES THE GEMINI ERROR
+        )
+        
+        # 4. Prepare Task Node and Context
+        task = TaskNode(id=str(uuid.uuid4()), description=description, agent_role=role)
+        context = {"workspace": self.workspace}
+        
+        # 5. Execute Task (Running synchronous agent loop in a thread to prevent blocking)
+        result_task = await asyncio.to_thread(agent.execute_task, task, context)
+        
+        # Extract Enum value safely (if NodeStatus is an Enum)
+        status_str = getattr(result_task.status, "name", str(result_task.status))
+        
+        return {
+            "status": status_str,
+            "output_data": result_task.output_data,
+            "error_message": result_task.error_message
+        }
 
     async def run(self, goal: str) -> Dict[str, Any]:
-        """
-        Starts the autonomous engineering process.
-
-        Args:
-            goal: The task to achieve.
-
-        Returns:
-            The final output state.
-        """
-        logger.info(f"Starting orchestration for: {goal}")
+        """Main execution loop for the agent swarm."""
+        logger.info("Initializing Orchestrator Run...")
         
-        # 1. Create the Graph
-        graph = await self.planner.create_plan(goal, {"workspace": self.workspace})
-        self.engine = ExecutionGraphEngine(graph)
-        await self.bus.publish(EventType.PLAN_CREATED, {"graph_id": graph.graph_id})
+        # 1. Ask the real LLM for a plan
+        try:
+            nodes = self.planner.create_plan(goal)
+            self.bus.publish("plan.created", {"nodes": len(nodes)})
+        except Exception as e:
+            logger.error("Planning phase failed.")
+            return {"success": False, "error": str(e)}
 
-        # 2. Main Loop
-        while not self.engine.is_finished:
-            runnable = self.engine.get_runnable_nodes()
+        if not nodes:
+            logger.warning("Planner returned an empty plan.")
+            return {"success": False, "error": "Empty plan generated"}
+
+        node_status = {n["id"]: "pending" for n in nodes}
+        
+        # 2. Naive Topological Execution Loop
+        for node in nodes:
+            node_id = node["id"]
+            role = node["agent_role"]
+            desc = node["description"]
             
-            if not runnable:
-                if not self.engine.is_finished:
-                    logger.warning("Deadlock or stalled graph detected.")
-                break
+            logger.info(f"Executing Node: [{node_id}] | Role: {role} | Desc: {desc}")
+            self.bus.publish("task.started", {"node_id": node_id})
+            self.repo.update_node_status(node_id, "running")
+            
+            # --- ACTUAL AGENT WORK ---
+            result = await self._route_and_execute(role, desc)
+            
+            # Check for standard completion statuses
+            if result["status"] == "COMPLETED" or result["status"] == "NodeStatus.COMPLETED":
+                logger.info(f"Node {node_id} completed successfully by {role} agent.")
+                node_status[node_id] = "completed"
+                self.bus.publish("task.completed", {"node_id": node_id, "status": "completed"})
+                self.repo.update_node_status(node_id, "completed", output=result["output_data"])
+            else:
+                error_msg = result.get("error_message", "Unknown error")
+                logger.error(f"Node {node_id} failed: {error_msg}")
+                node_status[node_id] = "failed"
+                self.bus.publish("task.failed", {"node_id": node_id, "error": error_msg})
+                self.repo.update_node_status(node_id, "failed", error=error_msg)
+                
+                # Halt execution on failure
+                return {
+                    "success": False, 
+                    "graph_id": self.graph_id,
+                    "executed_nodes": node_status,
+                    "error": f"Execution halted at node {node_id}: {error_msg}"
+                }
 
-            tasks = [self._execute_node(node) for node in runnable]
-            await asyncio.gather(*tasks)
-
-        return {"success": not self.engine.has_errors, "graph_id": graph.graph_id}
-
-    async def _execute_node(self, node: Any) -> None:
-        """Dispatches a node to the correct agent via the Event Bus."""
-        self.engine.update_node(node.node_id, NodeStatus.RUNNING)
-        await self.bus.publish(EventType.TASK_STARTED, {"node_id": node.node_id})
+        logger.info("All nodes completed successfully.")
         
-        # Simulate agent work
-        await asyncio.sleep(0.1)
-        
-        # In a real system, an agent would listen to TASK_STARTED and publish TASK_COMPLETED
-        # Here we simulate completion
-        self.engine.update_node(node.node_id, NodeStatus.COMPLETED, output={"result": "success"})
-        await self.bus.publish(EventType.TASK_COMPLETED, {"node_id": node.node_id})
-
-if __name__ == "__main__":
-    async def example():
-        logging.basicConfig(level=logging.INFO)
-        bus = EventBus()
-        planner = HierarchicalPlanner(llm_client=None)
-        orchestrator = Orchestrator(workspace="./tmp", planner=planner, bus=bus)
-        
-        async def log_event(p): print(f"LOG: {p}")
-        bus.subscribe(EventType.TASK_COMPLETED, log_event)
-
-        result = await orchestrator.run("Build a microservice for user auth")
-        print(f"Final Result: {result}")
-
-    asyncio.run(example())
+        return {
+            "success": True, 
+            "graph_id": self.graph_id,
+            "executed_nodes": node_status
+        }
