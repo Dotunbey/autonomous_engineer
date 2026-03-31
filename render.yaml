@@ -53,9 +53,8 @@ services:
         sync: false
 
 # 3. Managed Redis (Queue & Result Backend)
-databases:
-  - type: redis
-    name: autonomous-redis
+redis:
+  - name: autonomous-redis
     region: ohio
     plan: free
     maxmemoryPolicy: noeviction
