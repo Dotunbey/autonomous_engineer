@@ -1,3 +1,4 @@
+#!core/planner.py
 import os
 import json
 import logging
@@ -79,3 +80,4 @@ class HierarchicalPlanner:
             raise RuntimeError("Planner received invalid JSON from LLM") from e
         except Exception as e:
             logger.error(f"LLM API call failed: {e}")
+            raise

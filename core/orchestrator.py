@@ -56,13 +56,12 @@ class Orchestrator:
             # Fallback to Coder if specific agent file is missing
             from agents.coder import CoderAgent as AgentClass
 
-        # 3. Instantiate the Agent
-        # 3. Instantiate the Agent
+        # 3. Instantiate the Agent (CRITICAL FIX: Pass the model_name to override Llama3 default)
         agent = AgentClass(
             tool_registry=registry,
             retriever=retriever,
             llm_client=self.planner.llm_client,
-            model_name=self.planner.model  # <-- THIS FIXES THE GEMINI ERROR
+            model_name=self.planner.model
         )
         
         # 4. Prepare Task Node and Context
@@ -112,14 +111,22 @@ class Orchestrator:
             # --- ACTUAL AGENT WORK ---
             result = await self._route_and_execute(role, desc)
             
-            # Check for standard completion statuses
-            if result["status"] == "COMPLETED" or result["status"] == "NodeStatus.COMPLETED":
+            # Extract final answer to check for masked API failures
+            output_data = result.get("output_data") or {}
+            final_answer = output_data.get("final_result", "") if isinstance(output_data, dict) else str(output_data)
+            
+            # 3. Deep Validation
+            is_completed_status = result["status"] in ["COMPLETED", "NodeStatus.COMPLETED"]
+            is_api_failure = "FAIL: System encountered an API error" in final_answer
+            
+            if is_completed_status and not is_api_failure:
                 logger.info(f"Node {node_id} completed successfully by {role} agent.")
                 node_status[node_id] = "completed"
                 self.bus.publish("task.completed", {"node_id": node_id, "status": "completed"})
                 self.repo.update_node_status(node_id, "completed", output=result["output_data"])
             else:
-                error_msg = result.get("error_message", "Unknown error")
+                # Catch actual failures AND masked API failures
+                error_msg = final_answer if is_api_failure else result.get("error_message", "Unknown error")
                 logger.error(f"Node {node_id} failed: {error_msg}")
                 node_status[node_id] = "failed"
                 self.bus.publish("task.failed", {"node_id": node_id, "error": error_msg})
