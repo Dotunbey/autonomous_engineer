@@ -84,4 +84,4 @@ class HierarchicalPlanner:
             raise RuntimeError("Planner received invalid JSON from LLM") from e
         except Exception as e:
             logger.error(f"LLM API call failed: {e}")
-            raise
+            raise RuntimeError("Planner failed to generate a plan due to an API error") from e
