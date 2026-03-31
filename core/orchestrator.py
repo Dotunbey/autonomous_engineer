@@ -32,6 +32,63 @@ class Orchestrator:
         
         # 1. Initialize Memory & Tools for the Agent
         registry = ToolRegistry()
+        
+        # --- PRO FIX: Dynamic Tool Injection & Interception ---
+        # Prevents 429 loops by ensuring the agent ALWAYS has access to file & shell tools.
+        original_execute = getattr(registry, "execute", None)
+        original_list_tools = getattr(registry, "list_tools", None)
+        
+        def safe_execute(action: str, **kwargs) -> str:
+            # Intercept file writing tools
+            if action in ["write_file", "create_file"]:
+                path = kwargs.get("path", kwargs.get("filename", "output.txt"))
+                content = kwargs.get("content", kwargs.get("code", ""))
+                try:
+                    import os
+                    full_path = os.path.join(self.workspace, path)
+                    os.makedirs(os.path.dirname(full_path), exist_ok=True)
+                    with open(full_path, "w") as f:
+                        f.write(content)
+                    return f"Success: Wrote to {path}"
+                except Exception as e:
+                    return f"Tool Execution Error: Failed to write file - {e}"
+            
+            # Intercept shell execution tools
+            if action in ["run_shell_command", "execute_bash", "shell"]:
+                cmd = kwargs.get("command", kwargs.get("cmd", ""))
+                try:
+                    import subprocess
+                    res = subprocess.run(cmd, shell=True, capture_output=True, text=True, cwd=self.workspace)
+                    return f"STDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}"
+                except Exception as e:
+                    return f"Tool Execution Error: Shell failure - {e}"
+            
+            # Fallback to standard registry tools if any
+            if original_execute:
+                try:
+                    return original_execute(action, **kwargs)
+                except Exception as e:
+                    return f"Tool Execution Error: {str(e)}"
+            return f"Tool Execution Error: Action '{action}' not recognized. Use 'write_file' or 'run_shell_command'."
+
+        def safe_list_tools() -> list:
+            tools = original_list_tools() if original_list_tools else []
+            class InjectedTool:
+                def __init__(self, name: str, desc: str):
+                    self.name = name; self.description = desc
+                def dict(self) -> dict:
+                    return {"name": self.name, "description": self.description}
+                    
+            # Inject tools so they show up in the LLM's system prompt
+            tools.append(InjectedTool("write_file", "Writes text to a file. Arguments: 'path' (string), 'content' (string)"))
+            tools.append(InjectedTool("run_shell_command", "Executes a shell command. Arguments: 'command' (string)"))
+            return tools
+
+        # Bind the patched methods
+        registry.execute = safe_execute
+        registry.list_tools = safe_list_tools
+        # ------------------------------------------------------
+
         retriever = ContextRetriever(ShortTermMemory(), LongTermMemory())
         
         # 2. Select the correct Specialized Agent
@@ -52,10 +109,9 @@ class Orchestrator:
                 from agents.coder import CoderAgent as AgentClass
         except ImportError as e:
             logger.error(f"Could not import agent for role {role}: {e}")
-            # Fallback to Coder if specific agent file is missing
             from agents.coder import CoderAgent as AgentClass
 
-        # 3. Instantiate the Agent (CRITICAL FIX: Pass the model_name to override Llama3 default)
+        # 3. Instantiate the Agent (Pass the model_name to override defaults)
         agent = AgentClass(
             tool_registry=registry,
             retriever=retriever,
@@ -86,7 +142,8 @@ class Orchestrator:
         # 1. Ask the real LLM for a plan
         try:
             nodes = self.planner.create_plan(goal)
-            self.bus.publish("plan.created", {"nodes": len(nodes)})
+            # PRO FIX: Await the async event publisher to prevent Coroutine Warnings and graph tracking deadlocks
+            await self.bus.publish("plan.created", {"nodes": len(nodes)})
         except Exception as e:
             logger.error("Planning phase failed.")
             return {"success": False, "error": str(e)}
@@ -104,7 +161,7 @@ class Orchestrator:
             desc = node["description"]
             
             logger.info(f"Executing Node: [{node_id}] | Role: {role} | Desc: {desc}")
-            self.bus.publish("task.started", {"node_id": node_id})
+            await self.bus.publish("task.started", {"node_id": node_id})
             self.repo.update_node_status(node_id, "running")
             
             # --- ACTUAL AGENT WORK ---
@@ -121,14 +178,14 @@ class Orchestrator:
             if is_completed_status and not is_api_failure:
                 logger.info(f"Node {node_id} completed successfully by {role} agent.")
                 node_status[node_id] = "completed"
-                self.bus.publish("task.completed", {"node_id": node_id, "status": "completed"})
+                await self.bus.publish("task.completed", {"node_id": node_id, "status": "completed"})
                 self.repo.update_node_status(node_id, "completed", output=result["output_data"])
             else:
                 # Catch actual failures AND masked API failures
                 error_msg = final_answer if is_api_failure else result.get("error_message", "Unknown error")
                 logger.error(f"Node {node_id} failed: {error_msg}")
                 node_status[node_id] = "failed"
-                self.bus.publish("task.failed", {"node_id": node_id, "error": error_msg})
+                await self.bus.publish("task.failed", {"node_id": node_id, "error": error_msg})
                 self.repo.update_node_status(node_id, "failed", error=error_msg)
                 
                 # Halt execution on failure

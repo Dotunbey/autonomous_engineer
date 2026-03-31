@@ -1,4 +1,3 @@
-#!core/planner.py
 import os
 import json
 import logging
@@ -24,18 +23,23 @@ class HierarchicalPlanner:
         You are an expert AI software architect. Break down the user's engineering goal into a step-by-step execution plan.
         You MUST respond ONLY with a valid JSON object. Do NOT wrap it in markdown blockquotes (e.g. ```json).
         
+        CRITICAL RULES FOR DOWNSTREAM AGENTS:
+        - Downstream agents only have access to fundamental tools.
+        - Explicitly instruct them in the 'description' to use `write_file` to create/edit code.
+        - Explicitly instruct them to use `run_shell_command` to execute tests or bash commands.
+        
         The JSON must match this structure exactly:
         {
             "nodes": [
                 {
                     "id": "step_1",
-                    "description": "Create the hello_world.py file and write the print statement.",
+                    "description": "Create the hello_world.py file using the write_file tool and insert the print statement.",
                     "agent_role": "coder",
                     "dependencies": []
                 },
                 {
                     "id": "step_2",
-                    "description": "Review the file to ensure it prints exactly 'Hello from Render'.",
+                    "description": "Run the script using run_shell_command to verify it prints exactly 'Hello from Render'.",
                     "agent_role": "reviewer",
                     "dependencies": ["step_1"]
                 }
